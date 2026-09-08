@@ -40,13 +40,3 @@ npx drizzle-kit push:pg
 # Start development server
 npm run dev
 ```
-
-## Demo
-
-Watch the demo video to see Sekiato in action:
-- Code upload and scanning
-- Real-time vulnerability detection
-- Severity classification
-- Project management
-
-[Demo preview](https://youtu.be/RBXnhcxraWI?si=4fXjc01WniXGUnCp)
