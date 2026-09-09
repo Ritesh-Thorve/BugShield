@@ -1,7 +1,7 @@
 import { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Vulnerabilities - Sekiato",
+  title: "Vulnerabilities - BugShield",
   description: "Review and manage detected vulnerabilities",
 };
 

@@ -41,7 +41,7 @@ export default function Sidebar() {
       <div className="px-3 py-2 flex-1">
         <Link href="/dashboard" className="flex items-center pl-3 mb-14">
           <Shield className="h-8 w-8 text-primary" />
-          <h1 className="text-xl font-bold ml-2 truncate">Sekiato</h1>
+          <h1 className="text-xl font-bold ml-2 truncate">BugShield</h1>
         </Link>
         <div className="space-y-1">
           {routes.map((route) => (

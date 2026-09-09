@@ -4,7 +4,7 @@ import { DashboardHeader } from "@/components/dashboard/header";
 import { DashboardShell } from "@/components/dashboard/shell";
 
 export const metadata: Metadata = {
-  title: "Settings - Sekiato",
+  title: "Settings - BugShield",
   description: "Manage your account and security preferences",
 };
 

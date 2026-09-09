@@ -63,7 +63,7 @@ console.log(fileType)
 if (fileType == 'c++' || fileType == 'cpp') {
   // Parse the analysis results
   
-  const analysisResults = result.SekiAto_Analysis;
+  const analysisResults = result.BugShield_Analysis;
 //const parsedResults = parseAnalysisResults(analysisResults);
 const description = analysisResults.explanation;
 const severity = "high";

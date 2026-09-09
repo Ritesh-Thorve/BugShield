@@ -6,8 +6,8 @@ import { DashboardShell } from "../../components/dashboard/shell";
 import { NewProjectButton } from "../../components/projects/new-project-button";
 
 export const metadata: Metadata = {
-  title: "Projects - Sekiato",
-  description: "secure your projects with Sekiato",
+  title: "Projects - BugShield",
+  description: "secure your projects with BugShield",
 };
 
 export default function ProjectsPage() {

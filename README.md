@@ -32,7 +32,7 @@ npm install
 cp .env.example .env
 
 # Configure database
-DATABASE_URL="postgresql://username:password@localhost:5432/sekiato"
+DATABASE_URL="postgresql://username:password@localhost:5432/BugShield"
 
 # Run database migrations
 npx drizzle-kit push:pg

@@ -6,7 +6,7 @@ import { RecentScans } from "@/components/dashboard/recent-scans";
 import { ProjectStats } from "@/components/dashboard/project-stats";
 
 export const metadata: Metadata = {
-  title: "Dashboard - Sekiato",
+  title: "Dashboard - BugShield",
   description: "Monitor and manage your project vulnerabilities",
 };
 

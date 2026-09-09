@@ -335,7 +335,7 @@ export async function GET() {
     });
 
     // Add company name at bottom (single instance)
-    const companyText = 'SEKIATO';
+    const companyText = 'BugShield';
     const companyTextWidth = helveticaBold.widthOfTextAtSize(companyText, 28); // Increased size
     
     // Single company name with better positioning

@@ -9,7 +9,7 @@ import AuthLayout from '@/components/layout/auth-layout';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Sekiato - Vulnerability Scanner',
+  title: 'BugShield - Vulnerability Scanner',
   description: 'Detect and fix vulnerabilities in your source code',
 };
 
