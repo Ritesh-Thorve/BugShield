@@ -1,6 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getVulnerabilities } from '@/app/actions/projects';
-import { PDFDocument, PDFPage, RGB, rgb, StandardFonts } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFPage,
+  RGB,
+  rgb,
+  StandardFonts,
+} from 'pdf-lib';
+import fs from 'fs/promises';
+import path from 'path';
 
 export async function GET() {
   try {
@@ -12,14 +20,11 @@ export async function GET() {
     const helvetica = await doc.embedFont(StandardFonts.Helvetica);
     const helveticaBold = await doc.embedFont(StandardFonts.HelveticaBold);
     
-    // Fetch and embed the logo
-    const logoResponse = await fetch('https://sdmntpreastus2.oaiusercontent.com/files/00000000-ee0c-61f6-9d15-fe5840944efa/raw?se=2025-04-15T10%3A45%3A03Z&sp=r&sv=2024-08-04&sr=b&scid=d58ae80b-1ac0-5617-b774-09a3624aae3a&skoid=3f3a9132-9530-48ef-96b7-fee5a811733f&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2025-04-15T01%3A21%3A56Z&ske=2025-04-16T01%3A21%3A56Z&sks=b&skv=2024-08-04&sig=g4ZH2FlrZ%2BYZAQ/W2sThkejtXSij5oUeVps/QT8yVrw%3D');
-    const logoImageBytes = await logoResponse.arrayBuffer();
-    const logoImage = await doc.embedPng(logoImageBytes);
-    
-    // Get logo dimensions
-    const logoDims = logoImage.scale(0.5); // Scale down to 50%
-    
+    // Load and embed the local JPEG logo from /public/logo.jpg
+    const logoPath = path.join(process.cwd(), 'public', 'logo.jpeg');
+    const logoImageBytes = await fs.readFile(logoPath);
+    const logoImage = await doc.embedJpg(logoImageBytes);
+
     // Colors
     const darkBlue = rgb(0.07, 0.15, 0.34);
     const lightBlue = rgb(0.85, 0.9, 0.95);
@@ -644,7 +649,7 @@ export async function GET() {
         
         const cleanRecommendations = (vuln.description || '')
           .replace(/[\u{0080}-\u{FFFF}]/gu, '')
-          .replace(/\d+\.\s+/g, '• ') // Replace numbers with bullets
+          .replace(/\d+\.\s+/g, '• ') 
           .split('\n')
           .filter(line => line.trim())
           .join('\n\n');
@@ -672,8 +677,9 @@ export async function GET() {
 
     // Save the PDF
     const pdfBytes = await doc.save();
+    const pdfBody = new Uint8Array(pdfBytes).buffer;
 
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(pdfBody, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
