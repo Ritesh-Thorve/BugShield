@@ -2,7 +2,7 @@ export type ProjectStatus = 'pending' | 'scanning' | 'completed' | 'failed';
 
 export interface CreateProjectData {
   name: string;
-  code: string;
+  code?: string;
   repository: string;
 }
 

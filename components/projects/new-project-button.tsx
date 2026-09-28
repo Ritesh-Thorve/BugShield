@@ -25,8 +25,23 @@ declare global {
 export function NewProjectButton() {
   const [open, setOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [githubUrl, setGithubUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const submitProject = async (name: string, repository: string, code?: string) => {
+    await saveProject({
+      name,
+      repository,
+      code,
+    });
+
+    window.addProject?.(name, code ?? "");
+    setOpen(false);
+    setProjectName("");
+    setGithubUrl("");
+    setFileName("");
+  };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -41,19 +56,20 @@ export function NewProjectButton() {
       const code = e.target?.result as string;
       if (!code) return;
 
-      await saveProject({
-        name: nextProjectName,
-        code,
-        repository: file.name,
-      });
-
-      window.addProject?.(nextProjectName, code);
-      setOpen(false);
-      setProjectName("");
-      setFileName("");
+      await submitProject(nextProjectName, file.name, code);
     };
 
     reader.readAsText(file);
+  };
+
+  const handleGithubSubmit = async () => {
+    const trimmedUrl = githubUrl.trim();
+    if (!trimmedUrl) return;
+
+    const nextProjectName = projectName.trim() || "GitHub Project";
+    setProjectName(nextProjectName);
+
+    await submitProject(nextProjectName, trimmedUrl, "");
   };
 
   return (
@@ -67,7 +83,7 @@ export function NewProjectButton() {
         <DialogHeader>
           <DialogTitle>Create new project</DialogTitle>
           <DialogDescription>
-            Upload a file to create a new project
+            Add a GitHub URL or upload a file to create a new project
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -80,6 +96,31 @@ export function NewProjectButton() {
               placeholder="Enter project name"
             />
           </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="githubUrl">GitHub URL</Label>
+            <div className="flex gap-2">
+              <Input
+                id="githubUrl"
+                value={githubUrl}
+                onChange={(e) => setGithubUrl(e.target.value)}
+                placeholder="https://github.com/owner/repository"
+              />
+              <Button type="button" variant="secondary" onClick={handleGithubSubmit}>
+                Add URL
+              </Button>
+            </div>
+          </div>
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase tracking-wider text-muted-foreground">
+              <span className="bg-background px-2">Or</span>
+            </div>
+          </div>
+
           <div>
             <input
               type="file"

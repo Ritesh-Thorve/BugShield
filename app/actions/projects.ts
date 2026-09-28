@@ -16,6 +16,80 @@ function normalizeFileType(repository: string) {
   return (repository.split('.').pop() ?? '').trim().toLowerCase();
 }
 
+function isGitHubRepoUrl(value: string) {
+  return /github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i.test(value);
+}
+
+async function fetchGitHubRepositoryCode(repository: string) {
+  const match = repository.match(/github\.com\/([^/]+)\/([^/]+)(?:\/.*)?$/i);
+  if (!match) {
+    return '';
+  }
+
+  const [, owner, repo] = match;
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
+
+  const treeResponse = await fetch(apiUrl, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'sekiato-app',
+    },
+  });
+
+  if (!treeResponse.ok) {
+    return '';
+  }
+
+  const treeData = await treeResponse.json();
+  const files = Array.isArray(treeData?.tree)
+    ? treeData.tree.filter((item: any) => item && item.type === 'blob' && !item.path.startsWith('.git'))
+    : [];
+
+  const textExtensions = new Set([
+    'js', 'jsx', 'ts', 'tsx', 'py', 'php', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rb', 'rs', 'swift', 'yaml', 'yml', 'json', 'sql', 'sh', 'bash', 'css', 'html', 'xml'
+  ]);
+
+  const snippets: string[] = [];
+
+  for (const file of files) {
+    const path = file.path as string;
+    const extension = path.split('.').pop()?.toLowerCase() ?? '';
+
+    if (!textExtensions.has(extension)) {
+      continue;
+    }
+
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${path}`;
+    try {
+      const rawResponse = await fetch(rawUrl, {
+        headers: {
+          'User-Agent': 'sekiato-app',
+        },
+      });
+
+      if (!rawResponse.ok) {
+        continue;
+      }
+
+      const contentType = rawResponse.headers.get('content-type') ?? '';
+      if (contentType.includes('application/octet-stream') || contentType.includes('image/')) {
+        continue;
+      }
+
+      const text = await rawResponse.text();
+      if (!text || text.length > 400000) {
+        continue;
+      }
+
+      snippets.push(`// File: ${path}\n${text}`);
+    } catch {
+      continue;
+    }
+  }
+
+  return snippets.join('\n\n');
+}
+
 function getLocalAnalysis(code: string, fileType: string) {
   const source = code.toLowerCase();
   const matches = {
@@ -109,13 +183,20 @@ export async function getVulnerabilities() {
 
 export async function saveProject(data: CreateProjectData) {
   const id = globalThis.crypto.randomUUID()
-  const fileType = normalizeFileType(data.repository)
+  const repoValue = data.repository ?? ''
+  let rawCode = data.code ?? ''
+
+  if (!rawCode.trim() && isGitHubRepoUrl(repoValue)) {
+    rawCode = await fetchGitHubRepositoryCode(repoValue)
+  }
+
+  const fileType = normalizeFileType(repoValue)
 
   await db.insert(projects).values({
     id,
     name: data.name,
-    repository: data.repository,
-    code: data.code,
+    repository: repoValue,
+    code: rawCode,
     status: 'pending',
     issues: 0,
     lastScan: new Date(),
@@ -142,7 +223,36 @@ export async function saveProject(data: CreateProjectData) {
     }
   }
 
-  const analysis = result ? normalizeRemoteResult(fileType, result) : getLocalAnalysis(data.code, fileType)
+  const analysis = result ? normalizeRemoteResult(fileType, result) : getLocalAnalysis(rawCode, fileType)
+
+  if (!rawCode.trim()) {
+    const fallbackAnalysis = {
+      title: 'No source code was available for scanning',
+      severity: 'low',
+      description: 'The project repository could not be fetched or it contains no readable source code files.',
+      status: 'Clean',
+    };
+
+    await db.insert(vulnerabilities).values({
+      id: vulnId,
+      projectId: id,
+      title: fallbackAnalysis.title,
+      severity: fallbackAnalysis.severity,
+      description: fallbackAnalysis.description,
+      code: rawCode,
+      location: repoValue,
+      status: fallbackAnalysis.status,
+      createdAt: new Date(),
+    })
+
+    await db.update(projects).set({
+      status: 'completed',
+      issues: 0,
+      lastScan: new Date(),
+    }).where(eq(projects.id, id))
+
+    return { id }
+  }
 
   await db.insert(vulnerabilities).values({
     id: vulnId,
@@ -150,7 +260,7 @@ export async function saveProject(data: CreateProjectData) {
     title: analysis.title,
     severity: analysis.severity,
     description: analysis.description,
-    code: data.code,
+    code: rawCode,
     location: data.repository,
     status: analysis.status,
     createdAt: new Date(),
