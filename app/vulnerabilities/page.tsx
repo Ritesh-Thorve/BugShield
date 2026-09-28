@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { VulnerabilityList } from "@/components/vulnerabilities/vulnerability-list";
 import { DashboardHeader } from "@/components/dashboard/header";
 import { DashboardShell } from "@/components/dashboard/shell";
@@ -7,6 +8,10 @@ import { VulnerabilityFilters } from "@/components/vulnerabilities/vulnerability
 import { Button } from "@/components/ui/button";
 
 export default function VulnerabilitiesPage() {
+  const [search, setSearch] = useState("");
+  const [severity, setSeverity] = useState("all");
+  const [status, setStatus] = useState("all");
+
   return (
     <DashboardShell>
       <DashboardHeader
@@ -17,8 +22,15 @@ export default function VulnerabilitiesPage() {
           Download Report
         </Button>
       </DashboardHeader>
-      <VulnerabilityFilters />
-      <VulnerabilityList />
+      <VulnerabilityFilters
+        search={search}
+        severity={severity}
+        status={status}
+        onSearchChange={setSearch}
+        onSeverityChange={setSeverity}
+        onStatusChange={setStatus}
+      />
+      <VulnerabilityList search={search} severity={severity} status={status} />
     </DashboardShell>
   );
 }

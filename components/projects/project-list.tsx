@@ -12,9 +12,9 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Play, Trash2, Code } from "lucide-react";
+import { Play, Trash2, Code, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { getProjects } from "@/app/actions/projects";
+import { deleteProject, getProjects, scanProject } from "@/app/actions/projects";
 
 interface Project {
   id: string;
@@ -29,37 +29,73 @@ interface Project {
 export function ProjectList() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
+    let mounted = true;
     async function loadProjects() {
-      const dbProjects = await getProjects();
-      setProjects(dbProjects.map(project => ({
-        ...project,
-        lastScan: project.lastScan ? new Date(project.lastScan).toLocaleString() : 'Never',
-        status: project.status || 'unknown',
-        issues: project.issues || 0,
-        code: project.code || '',
-      })));
+      try {
+        const dbProjects = await getProjects();
+        if (!mounted) return;
+        setProjects(dbProjects.map(project => ({
+          ...project,
+          lastScan: project.lastScan ? new Date(project.lastScan).toLocaleString() : 'Never',
+          status: project.status || 'unknown',
+          issues: project.issues || 0,
+          code: project.code || '',
+        })));
+        setError("");
+      } catch (caughtError) {
+        if (mounted) setError(caughtError instanceof Error ? caughtError.message : "Could not load projects.");
+      } finally {
+        if (mounted) setLoading(false);
+      }
     }
     loadProjects();
-  }, []);
-  // Add this function to handle new projects
-  window.addProject = (name: string, code: string) => {
-    const newProject = {
-      id: Date.now().toString(),
-      name,
-      repository: "local/file",
-      lastScan: "Just now",
-      status: "pending",
-      issues: 0,
-      code,
+    const refresh = () => loadProjects();
+    window.addEventListener("projects:refresh", refresh);
+    return () => {
+      mounted = false;
+      window.removeEventListener("projects:refresh", refresh);
     };
-    setProjects(prev => [newProject, ...prev]);
+  }, []);
+
+  const handleScan = async (projectId: string) => {
+    setBusyProjectId(projectId);
+    setError("");
+    try {
+      await scanProject(projectId);
+      window.dispatchEvent(new Event("projects:refresh"));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Could not scan this project.");
+    } finally {
+      setBusyProjectId(null);
+    }
+  };
+
+  const handleDelete = async (projectId: string) => {
+    if (!window.confirm("Delete this project and its scan results?")) return;
+    setBusyProjectId(projectId);
+    setError("");
+    try {
+      await deleteProject(projectId);
+      setProjects(current => current.filter(project => project.id !== projectId));
+      if (selectedProject?.id === projectId) setSelectedProject(null);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Could not delete this project.");
+    } finally {
+      setBusyProjectId(null);
+    }
   };
 
   return (
     <div className="space-y-4">
-      {projects.length === 0 ? (
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading projects...</div>
+      ) : projects.length === 0 ? (
         <Card className="p-6 text-center text-muted-foreground">
           No projects yet. Add a project to begin scanning for vulnerabilities.
         </Card>
@@ -82,11 +118,10 @@ export function ProjectList() {
                   <TableCell>{project.repository}</TableCell>
                   <TableCell>{project.lastScan}</TableCell>
                   <TableCell>
-                    <Badge
-                      variant={project.status === "critical" ? "destructive" : "outline"}
-                    >
-                      {project.issues} issues
-                    </Badge>
+                    <div className="flex flex-col items-start gap-1">
+                      <Badge variant={project.status === "failed" ? "destructive" : "outline"}>{project.status}</Badge>
+                      <span className="text-xs text-muted-foreground">{project.issues} findings</span>
+                    </div>
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-2">
@@ -95,13 +130,14 @@ export function ProjectList() {
                         variant="ghost"
                         onClick={() => setSelectedProject(project)}
                         disabled={!project.code}
+                        title="View source code"
                       >
                         <Code className="h-4 w-4" />
                       </Button>
-                      <Button size="icon" variant="ghost">
-                        <Play className="h-4 w-4" />
+                      <Button size="icon" variant="ghost" onClick={() => handleScan(project.id)} disabled={busyProjectId === project.id} title="Scan project">
+                        {busyProjectId === project.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       </Button>
-                      <Button size="icon" variant="ghost">
+                      <Button size="icon" variant="ghost" onClick={() => handleDelete(project.id)} disabled={busyProjectId === project.id} title="Delete project">
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </div>

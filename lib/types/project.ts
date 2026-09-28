@@ -35,4 +35,5 @@ export interface Vulnerability {
   location: string | null;
   status: string | null;
   createdAt: Date | null;
+  repository?: string | null;
 }

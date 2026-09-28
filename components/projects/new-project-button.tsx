@@ -13,34 +13,32 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Upload } from "lucide-react";
-import { Card } from "@/components/ui/card";
-
-declare global {
-  interface Window {
-    addProject: (name: string, code: string) => void;
-  }
-}
+import { Loader2, Plus, Upload } from "lucide-react";
 
 export function NewProjectButton() {
   const [open, setOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [githubUrl, setGithubUrl] = useState("");
   const [fileName, setFileName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const submitProject = async (name: string, repository: string, code?: string) => {
-    await saveProject({
-      name,
-      repository,
-      code,
-    });
-
-    window.addProject?.(name, code ?? "");
-    setOpen(false);
-    setProjectName("");
-    setGithubUrl("");
-    setFileName("");
+    setSubmitting(true);
+    setError("");
+    try {
+      await saveProject({ name, repository, code });
+      window.dispatchEvent(new Event("projects:refresh"));
+      setOpen(false);
+      setProjectName("");
+      setGithubUrl("");
+      setFileName("");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to scan this project.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -50,23 +48,19 @@ export function NewProjectButton() {
     const nextProjectName = projectName.trim() || file.name.replace(/\.[^/.]+$/, "");
     setProjectName(nextProjectName);
     setFileName(file.name);
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const code = e.target?.result as string;
-      if (!code) return;
-
+    try {
+      const code = await file.text();
       await submitProject(nextProjectName, file.name, code);
-    };
-
-    reader.readAsText(file);
+    } catch {
+      setError("Could not read this file. Please choose a text source file.");
+    }
   };
 
   const handleGithubSubmit = async () => {
     const trimmedUrl = githubUrl.trim();
     if (!trimmedUrl) return;
 
-    const nextProjectName = projectName.trim() || "GitHub Project";
+    const nextProjectName = projectName.trim() || trimmedUrl.split("/").filter(Boolean).at(-1) || "GitHub Project";
     setProjectName(nextProjectName);
 
     await submitProject(nextProjectName, trimmedUrl, "");
@@ -94,6 +88,7 @@ export function NewProjectButton() {
               value={projectName}
               onChange={(e) => setProjectName(e.target.value)}
               placeholder="Enter project name"
+              disabled={submitting}
             />
           </div>
 
@@ -105,9 +100,10 @@ export function NewProjectButton() {
                 value={githubUrl}
                 onChange={(e) => setGithubUrl(e.target.value)}
                 placeholder="https://github.com/owner/repository"
+                disabled={submitting}
               />
-              <Button type="button" variant="secondary" onClick={handleGithubSubmit}>
-                Add URL
+              <Button type="button" variant="secondary" onClick={handleGithubSubmit} disabled={submitting || !githubUrl.trim()}>
+                {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Scan"}
               </Button>
             </div>
           </div>
@@ -128,16 +124,19 @@ export function NewProjectButton() {
               onChange={handleFileChange}
               className="hidden"
               accept=".js,.jsx,.ts,.tsx,.py,.java,.cpp,.c,.php"
+              disabled={submitting}
             />
             <Button
               variant="outline"
               className="w-full"
               onClick={() => fileInputRef.current?.click()}
+              disabled={submitting}
             >
-              <Upload className="mr-2 h-4 w-4" />
-              {fileName || "Upload File"}
+              {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+              {submitting ? "Scanning..." : fileName || "Upload and scan file"}
             </Button>
           </div>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         </div>
       </DialogContent>
     </Dialog>

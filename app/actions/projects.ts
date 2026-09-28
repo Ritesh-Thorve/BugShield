@@ -2,175 +2,148 @@
 
 import { eq } from 'drizzle-orm'
 import { db } from '@/lib/db'
-import { projects, vulnerabilities } from '@/lib/db/schema'
+import { projects, scans, vulnerabilities } from '@/lib/db/schema'
 import type { CreateProjectData } from '@/lib/types/project'
 
-const FALLBACK_PORTS: Record<string, string> = {
-  cpp: 'http://127.0.0.1:8000/predict',
-  'c++': 'http://127.0.0.1:8000/predict',
-  js: 'http://127.0.0.1:8001/predict',
-  php: 'http://127.0.0.1:8003/predict',
-};
-
-function normalizeFileType(repository: string) {
-  return (repository.split('.').pop() ?? '').trim().toLowerCase();
-}
-
-function isGitHubRepoUrl(value: string) {
-  return /github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i.test(value);
-}
-
 async function fetchGitHubRepositoryCode(repository: string) {
-  const match = repository.match(/github\.com\/([^/]+)\/([^/]+)(?:\/.*)?$/i);
-  if (!match) {
-    return '';
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(repository);
+  } catch {
+    throw new Error('Enter a valid public GitHub repository URL.');
   }
 
-  const [, owner, repo] = match;
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
+  const [owner, repo] = parsedUrl.pathname.split('/').filter(Boolean);
+  if (parsedUrl.hostname !== 'github.com' || !owner || !repo) {
+    throw new Error('Enter a URL in the form https://github.com/owner/repository.');
+  }
 
-  const treeResponse = await fetch(apiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'sekiato-app',
-    },
-  });
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'sekiato-app',
+  };
+  const repoResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+  if (!repoResponse.ok) {
+    throw new Error(repoResponse.status === 404
+      ? 'Repository not found or private. Only public GitHub repositories can be scanned.'
+      : `GitHub could not load this repository (HTTP ${repoResponse.status}).`);
+  }
 
+  const repoData = await repoResponse.json();
+  const treeResponse = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(repoData.default_branch)}?recursive=1`,
+    { headers },
+  );
   if (!treeResponse.ok) {
-    return '';
+    throw new Error(`GitHub could not list repository files (HTTP ${treeResponse.status}).`);
   }
 
   const treeData = await treeResponse.json();
-  const files = Array.isArray(treeData?.tree)
-    ? treeData.tree.filter((item: any) => item && item.type === 'blob' && !item.path.startsWith('.git'))
-    : [];
-
-  const textExtensions = new Set([
-    'js', 'jsx', 'ts', 'tsx', 'py', 'php', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rb', 'rs', 'swift', 'yaml', 'yml', 'json', 'sql', 'sh', 'bash', 'css', 'html', 'xml'
+  if (treeData.truncated) {
+    throw new Error('GitHub truncated this repository file listing, so a complete scan is not possible through its API.');
+  }
+  const allowedExtensions = new Set([
+    'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'py', 'php', 'java', 'c', 'cc', 'cpp', 'h', 'hh', 'hpp', 'cs', 'go', 'rb', 'rs', 'swift', 'kt', 'kts', 'scala', 'sql', 'sh', 'bash', 'yml', 'yaml', 'json', 'toml', 'ini', 'xml', 'html', 'css', 'conf', 'properties', 'env',
   ]);
+  const excludedPath = /(^|\/)(\.git|node_modules|vendor|dist|build|coverage|\.next|target|Pods|\.venv|venv)(\/|$)/i;
+  const excludedFile = /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|composer\.lock|poetry\.lock|Gemfile\.lock|go\.sum)$/i;
+  const files = (Array.isArray(treeData.tree) ? treeData.tree : [])
+    .filter((item: { type?: string; path?: string }) => {
+      const filePath = item.path ?? '';
+      const name = filePath.split('/').pop() ?? '';
+      const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() ?? '' : name.toLowerCase();
+      return item.type === 'blob'
+        && allowedExtensions.has(extension)
+        && !excludedPath.test(filePath)
+        && !excludedFile.test(filePath);
+    });
+  if (!files.length) {
+    throw new Error('No supported source or configuration files were found in this repository.');
+  }
 
-  const snippets: string[] = [];
-
-  for (const file of files) {
-    const path = file.path as string;
-    const extension = path.split('.').pop()?.toLowerCase() ?? '';
-
-    if (!textExtensions.has(extension)) {
-      continue;
-    }
-
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${path}`;
-    try {
-      const rawResponse = await fetch(rawUrl, {
-        headers: {
-          'User-Agent': 'sekiato-app',
-        },
-      });
-
-      if (!rawResponse.ok) {
-        continue;
+  const sources: string[] = [];
+  let totalCharacters = 0;
+  const maximumCharacters = 50 * 1024 * 1024;
+  for (let index = 0; index < files.length; index += 8) {
+    const batch = files.slice(index, index + 8);
+    const batchSources = await Promise.all(batch.map(async (file: { path: string }) => {
+      const encodedPath = file.path.split('/').map(encodeURIComponent).join('/');
+      const response = await fetch(
+        `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(repoData.default_branch)}/${encodedPath}`,
+        { headers: { 'User-Agent': 'sekiato-app' } },
+      );
+      if (!response.ok) {
+        throw new Error(`Could not download ${file.path} from GitHub (HTTP ${response.status}); scan stopped to avoid partial results.`);
       }
+      return { path: file.path, text: await response.text() };
+    }));
 
-      const contentType = rawResponse.headers.get('content-type') ?? '';
-      if (contentType.includes('application/octet-stream') || contentType.includes('image/')) {
-        continue;
+    for (const source of batchSources) {
+      totalCharacters += source.text.length;
+      if (totalCharacters > maximumCharacters) {
+        throw new Error('Repository source exceeds the 50 MB scan limit; no partial scan was saved.');
       }
-
-      const text = await rawResponse.text();
-      if (!text || text.length > 400000) {
-        continue;
-      }
-
-      snippets.push(`// File: ${path}\n${text}`);
-    } catch {
-      continue;
+      sources.push(`// File: ${source.path}\n${source.text}`);
     }
   }
 
-  return snippets.join('\n\n');
+  const code = sources.join('\n\n');
+  if (!code.trim()) {
+    throw new Error('No readable source files were found in this repository.');
+  }
+  return code;
 }
 
-function getLocalAnalysis(code: string, fileType: string) {
-  const source = code.toLowerCase();
-  const matches = {
-    injection: /(eval\s*\(|document\.cookie|innerhtml|outerhtml|new\s+function|exec\s*\(|system\s*\(|shell_exec\s*\(|mysqli_query\s*\(|\$_get\[|\$_post\[|strcpy\s*\(|gets\s*\()/i,
-    sensitive: /(api[_-]?key|secret|token|password|private[_-]?key)/i,
-    unsafeRead: /(fs\.readFile|file_get_contents|readFileSync|http\.request|fetch\s*\()/i,
-  };
+function findVulnerabilities(code: string, sourceName = 'Uploaded source') {
+  const rules = [
+    { title: 'Dynamic code execution', severity: 'high', description: 'Dynamic evaluation can execute attacker-controlled input.', pattern: /\beval\s*\(|\bnew\s+Function\s*\(/i },
+    { title: 'Unsafe HTML injection (XSS)', severity: 'high', description: 'Writing data to an HTML sink can enable cross-site scripting.', pattern: /\.innerHTML\s*=|\.outerHTML\s*=|document\.write\s*\(|dangerouslySetInnerHTML/i },
+    { title: 'Potential cross-site scripting', severity: 'medium', description: 'Unescaped user-controlled output may be interpreted as HTML or script.', pattern: /\bres\.send\s*\(\s*(req\.|request\.)|\bhtml_safe\b|\bsafe\s*\|/i },
+    { title: 'Unsafe shell execution', severity: 'high', description: 'Shell execution with dynamic input can enable command injection.', pattern: /\b(shell_exec|system|passthru|popen|child_process\.exec|execSync)\s*\(|\bexec\s*\(/i },
+    { title: 'Subprocess with shell enabled', severity: 'high', description: 'Enabling shell execution for subprocess calls risks command injection.', pattern: /subprocess\.[\w]+\([^\n]*shell\s*=\s*True/i },
+    { title: 'Unsafe PHP file inclusion', severity: 'high', description: 'Including a path derived from request input can enable file inclusion or traversal.', pattern: /\b(include|require)(_once)?\s*\(?\s*[^;]*(\$_(GET|POST|REQUEST|FILES))/i },
+    { title: 'Path traversal risk', severity: 'high', description: 'A user-controlled path is passed to a file read/write operation without visible validation.', pattern: /(readFile|readFileSync|createReadStream|writeFile|sendFile|open)\s*\([^\n]*(req\.(query|params|body)|request\.(GET|POST)|\$_(GET|POST|REQUEST))/i },
+    { title: 'Unsafe memory operation', severity: 'high', description: 'Unbounded memory-copy or formatting functions can cause buffer overflows.', pattern: /\b(strcpy|strcat|sprintf|gets|memcpy)\s*\(/i },
+    { title: 'Potential SQL injection', severity: 'high', description: 'SQL query construction appears to combine query text with untrusted input; use parameterized queries.', pattern: /(query|execute|raw)\s*\([^\n]*(\$_(GET|POST|REQUEST)|\+\s*(req\.|request\.)|\$\{.*(?:req|params|input))/i },
+    { title: 'Potential NoSQL injection', severity: 'high', description: 'Request data is used directly in a database filter, which may allow query-operator injection.', pattern: /(find|findOne|updateOne|deleteOne)\s*\(\s*(req\.(body|query)|request\.(json|form))/i },
+    { title: 'Potential server-side request forgery', severity: 'high', description: 'A request URL appears to be derived from user input; validate and allowlist destinations.', pattern: /(fetch|axios\.(get|post)|requests\.(get|post)|http\.get)\s*\(\s*(req\.|request\.|userInput|url\b)/i },
+    { title: 'Insecure deserialization', severity: 'high', description: 'Deserializing untrusted data can lead to code execution or object injection.', pattern: /(pickle\.loads|yaml\.load\s*\((?![^)]*SafeLoader)|unserialize\s*\(|ObjectInputStream|JavaScriptSerializer)/i },
+    { title: 'Potential XXE', severity: 'high', description: 'XML parsing should disable external entity resolution for untrusted XML.', pattern: /(DocumentBuilderFactory|SAXParserFactory|XMLReader|etree\.parse|lxml\.etree)/i },
+    { title: 'Weak cryptographic hash', severity: 'medium', description: 'MD5 or SHA-1 is unsuitable for security-sensitive hashing.', pattern: /(md5|sha1|createHash\s*\(\s*['"](?:md5|sha1))/i },
+    { title: 'Insecure TLS verification', severity: 'high', description: 'TLS certificate verification appears disabled, allowing man-in-the-middle attacks.', pattern: /(rejectUnauthorized\s*:\s*false|verify\s*=\s*False|InsecureSkipVerify\s*:\s*true|CERT_NONE)/i },
+    { title: 'Permissive CORS configuration', severity: 'medium', description: 'Wildcard CORS combined with credentials can expose authenticated responses.', pattern: /(Access-Control-Allow-Origin['"]?\s*[,=:]\s*['"]\*|origin\s*:\s*['"]\*['"])/i },
+    { title: 'Hardcoded credential', severity: 'high', description: 'A credential-like value appears hardcoded; move secrets to a secure secret store.', pattern: /(?:api[_-]?key|client[_-]?secret|password|passwd|token|secret)\s*[:=]\s*['"][^'"]{8,}['"]/i },
+    { title: 'Insecure random number generator', severity: 'medium', description: 'Non-cryptographic randomness must not be used for tokens, keys, or security-sensitive identifiers.', pattern: /(Math\.random\s*\(|random\.random\s*\(|new Random\s*\()/i },
+    { title: 'Unsafe open redirect', severity: 'medium', description: 'Redirect destination may be controlled by user input; validate against an allowlist.', pattern: /(redirect|location\.href)\s*\(?\s*(req\.(query|body)|request\.(GET|POST)|\$_(GET|POST))/i },
+    { title: 'Potential ReDoS', severity: 'medium', description: 'Nested or ambiguous repetition in a regular expression may cause excessive backtracking.', pattern: /new RegExp\s*\([^\n]*(req\.|request\.|userInput)|\/\([^)]*[+*][^)]*\)[+*]/i },
+    { title: 'Unsafe cookie configuration', severity: 'medium', description: 'Cookie configuration should enable HttpOnly, Secure, and an appropriate SameSite policy.', pattern: /(cookie|setCookie)\s*\([^\n]*(httpOnly\s*:\s*false|secure\s*:\s*false|sameSite\s*:\s*false)/i },
+    { title: 'Debug mode enabled', severity: 'medium', description: 'Debug mode can expose sensitive diagnostics and should be disabled in production.', pattern: /(DEBUG\s*=\s*True|debug\s*:\s*true|app\.run\([^\n]*debug\s*=\s*True)/i },
+  ];
 
-  const isVulnerable = Object.values(matches).some((pattern) => pattern.test(code));
-
-  if (isVulnerable) {
-    const severity =
-      /(eval\s*\(|innerhtml|document\.cookie|exec\s*\(|system\s*\(|strcpy\s*\(|gets\s*\()/i.test(code)
-        ? 'high'
-        : /(mysqli_query\s*\(|\$_get\[|\$_post\[|fetch\s*\()/i.test(code)
-          ? 'medium'
-          : 'low';
-
-    let description = 'Unsafe pattern detected in the uploaded code.';
-
-    if (fileType === 'js' || fileType === 'jsx' || fileType === 'ts' || fileType === 'tsx') {
-      description = 'The code contains unsafe dynamic execution or DOM injection patterns that can lead to XSS or code injection.';
-    } else if (fileType === 'php') {
-      description = 'The code uses direct request data or command execution without validation, which can expose injection or command execution risks.';
-    } else if (fileType === 'cpp' || fileType === 'c++' || fileType === 'c') {
-      description = 'The code uses unsafe string or command execution APIs that can result in buffer overflows or command injection.';
+  const findings: Array<{ title: string; severity: string; description: string; location: string; code: string }> = [];
+  let currentFile = sourceName;
+  let currentLine = 0;
+  for (const line of code.split('\n')) {
+    const fileMarker = line.match(/^\/\/ File: (.+)$/);
+    if (fileMarker) {
+      currentFile = fileMarker[1];
+      currentLine = 0;
+      continue;
     }
-
-    return {
-      title: 'Security Vulnerability Detected',
-      severity,
-      description,
-      status: 'Vulnerable',
-      location: 'Local code analysis',
-    };
+    currentLine += 1;
+    for (const rule of rules) {
+      if (rule.pattern.test(line)) {
+        findings.push({
+          title: rule.title,
+          severity: rule.severity,
+          description: rule.description,
+          location: `${currentFile}:${currentLine}`,
+          code: line.trim().slice(0, 1000),
+        });
+      }
+    }
   }
-
-  return {
-    title: 'No Vulnerability Found',
-    severity: 'low',
-    description: 'No high-confidence vulnerability pattern was detected in the uploaded source code.',
-    status: 'Clean',
-    location: 'Local code analysis',
-  };
-}
-
-function normalizeRemoteResult(fileType: string, result: any) {
-  if (fileType === 'cpp' || fileType === 'c++') {
-    const analysis = result?.BugShield_Analysis ?? result ?? {};
-    return {
-      title: analysis?.vulnerability_status === 'Vulnerable' ? 'Security Vulnerability Detected' : 'No Vulnerability Found',
-      severity: analysis?.severity ?? 'high',
-      description: analysis?.explanation ?? 'No explanation provided.',
-      status: analysis?.vulnerability_status ?? 'Clean',
-    };
-  }
-
-  if (fileType === 'js') {
-    return {
-      title: result?.status === 'Vulnerable' ? 'Security Vulnerability Detected' : 'No Vulnerability Found',
-      severity: result?.severity ?? 'low',
-      description: result?.description ?? 'No description provided.',
-      status: result?.status ?? 'Clean',
-    };
-  }
-
-  if (fileType === 'php') {
-    return {
-      title: result?.name ?? 'Security Scan Result',
-      severity: result?.severity ?? 'low',
-      description: `${result?.description ?? 'No description provided.'} ${result?.vulnerable_code ?? ''}`.trim(),
-      status: result?.status ?? 'Clean',
-    };
-  }
-
-  return {
-    title: 'Security Scan Result',
-    severity: 'low',
-    description: 'No analysis data returned.',
-    status: 'Clean',
-  };
+  return findings;
 }
 
 export async function getProjects() {
@@ -178,99 +151,93 @@ export async function getProjects() {
 }
 
 export async function getVulnerabilities() {
-  return await db.select().from(vulnerabilities)
+  return await db.select({
+    id: vulnerabilities.id,
+    projectId: vulnerabilities.projectId,
+    title: vulnerabilities.title,
+    severity: vulnerabilities.severity,
+    description: vulnerabilities.description,
+    code: vulnerabilities.code,
+    location: vulnerabilities.location,
+    status: vulnerabilities.status,
+    createdAt: vulnerabilities.createdAt,
+    repository: projects.repository,
+  }).from(vulnerabilities).leftJoin(projects, eq(vulnerabilities.projectId, projects.id));
 }
 
 export async function saveProject(data: CreateProjectData) {
-  const id = globalThis.crypto.randomUUID()
-  const repoValue = data.repository ?? ''
-  let rawCode = data.code ?? ''
-
-  if (!rawCode.trim() && isGitHubRepoUrl(repoValue)) {
-    rawCode = await fetchGitHubRepositoryCode(repoValue)
-  }
-
-  const fileType = normalizeFileType(repoValue)
-
+  const repoValue = data.repository.trim();
+  const rawCode = data.code?.trim()
+    ? data.code
+    : await fetchGitHubRepositoryCode(repoValue);
+  const id = globalThis.crypto.randomUUID();
   await db.insert(projects).values({
     id,
-    name: data.name,
+    name: data.name.trim(),
     repository: repoValue,
     code: rawCode,
-    status: 'pending',
+    status: 'scanning',
     issues: 0,
     lastScan: new Date(),
-  })
-
-  const url = FALLBACK_PORTS[fileType] ?? ''
-  const vulnId = globalThis.crypto.randomUUID()
-
-  let result: any = null;
-
-  if (url) {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: data.code }),
-      });
-
-      if (response.ok) {
-        result = await response.json();
-      }
-    } catch (error) {
-      console.warn(`Scanner backend unavailable for ${fileType}:`, error)
-    }
-  }
-
-  const analysis = result ? normalizeRemoteResult(fileType, result) : getLocalAnalysis(rawCode, fileType)
-
-  if (!rawCode.trim()) {
-    const fallbackAnalysis = {
-      title: 'No source code was available for scanning',
-      severity: 'low',
-      description: 'The project repository could not be fetched or it contains no readable source code files.',
-      status: 'Clean',
-    };
-
-    await db.insert(vulnerabilities).values({
-      id: vulnId,
+  });
+  const findings = findVulnerabilities(rawCode, repoValue);
+  if (findings.length) {
+    await db.insert(vulnerabilities).values(findings.map((finding) => ({
+      id: globalThis.crypto.randomUUID(),
       projectId: id,
-      title: fallbackAnalysis.title,
-      severity: fallbackAnalysis.severity,
-      description: fallbackAnalysis.description,
-      code: rawCode,
-      location: repoValue,
-      status: fallbackAnalysis.status,
+      title: finding.title,
+      severity: finding.severity,
+      description: finding.description,
+      code: finding.code,
+      location: finding.location,
+      status: 'open',
       createdAt: new Date(),
-    })
-
-    await db.update(projects).set({
-      status: 'completed',
-      issues: 0,
-      lastScan: new Date(),
-    }).where(eq(projects.id, id))
-
-    return { id }
+    })));
   }
-
-  await db.insert(vulnerabilities).values({
-    id: vulnId,
-    projectId: id,
-    title: analysis.title,
-    severity: analysis.severity,
-    description: analysis.description,
-    code: rawCode,
-    location: data.repository,
-    status: analysis.status,
-    createdAt: new Date(),
-  })
-
   await db.update(projects).set({
     status: 'completed',
-    issues: analysis.status === 'Vulnerable' ? 1 : 0,
+    issues: findings.length,
     lastScan: new Date(),
-  }).where(eq(projects.id, id))
+  }).where(eq(projects.id, id));
 
-  return { id }
+  return { id, findings: findings.length };
+}
+
+export async function scanProject(projectId: string) {
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!project) throw new Error('Project not found.');
+
+  const code = project.repository.startsWith('https://github.com/')
+    ? await fetchGitHubRepositoryCode(project.repository)
+    : project.code ?? '';
+  if (!code.trim()) throw new Error('No source code is available to scan.');
+
+  const findings = findVulnerabilities(code, project.repository);
+  await db.delete(vulnerabilities).where(eq(vulnerabilities.projectId, projectId));
+  if (findings.length) {
+    await db.insert(vulnerabilities).values(findings.map((finding) => ({
+      id: globalThis.crypto.randomUUID(),
+      projectId,
+      title: finding.title,
+      severity: finding.severity,
+      description: finding.description,
+      code: finding.code,
+      location: finding.location,
+      status: 'open',
+      createdAt: new Date(),
+    })));
+  }
+  await db.update(projects).set({
+    code,
+    status: 'completed',
+    issues: findings.length,
+    lastScan: new Date(),
+  }).where(eq(projects.id, projectId));
+  return { findings: findings.length };
+}
+
+export async function deleteProject(projectId: string) {
+  await db.delete(vulnerabilities).where(eq(vulnerabilities.projectId, projectId));
+  await db.delete(scans).where(eq(scans.projectId, projectId));
+  await db.delete(projects).where(eq(projects.id, projectId));
 }
