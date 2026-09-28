@@ -27,12 +27,12 @@ export type ProjectSummary = Omit<Project, 'code'>;
 
 export interface Vulnerability {
   id: string;
-  projectId: string;
+  projectId: string | null;
   title: string;
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  description: string;
-  code: string;
-  location: string;
-  status: 'open' | 'closed';
-  createdAt: Date;
+  severity: string;
+  description: string | null;
+  code: string | null;
+  location: string | null;
+  status: string | null;
+  createdAt: Date | null;
 }

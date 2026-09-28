@@ -30,29 +30,30 @@ export function NewProjectButton() {
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      setFileName(file.name);
-      if (!projectName) {
-        setProjectName(file.name.replace(/\.[^/.]+$/, ""));
-      }
-      
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const code = e.target?.result as string;
-        if (projectName && code) {
-          await saveProject({
-            name: projectName,
-            code: code,
-            repository: file.name
-          });
-          window.addProject?.(projectName, code);
-          setOpen(false);
-          setProjectName("");
-          setFileName("");
-        }
-      };
-      reader.readAsText(file);
-    }
+    if (!file) return;
+
+    const nextProjectName = projectName.trim() || file.name.replace(/\.[^/.]+$/, "");
+    setProjectName(nextProjectName);
+    setFileName(file.name);
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const code = e.target?.result as string;
+      if (!code) return;
+
+      await saveProject({
+        name: nextProjectName,
+        code,
+        repository: file.name,
+      });
+
+      window.addProject?.(nextProjectName, code);
+      setOpen(false);
+      setProjectName("");
+      setFileName("");
+    };
+
+    reader.readAsText(file);
   };
 
   return (

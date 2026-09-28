@@ -26,27 +26,8 @@ interface Project {
   code?: string;
 }
 
-const initialProjects = [
-  {
-    id: "1",
-    name: "Frontend App",
-    repository: "org/frontend-app",
-    lastScan: "2 hours ago",
-    status: "healthy",
-    issues: 2,
-  },
-  {
-    id: "2",
-    name: "Backend API",
-    repository: "org/backend-api",
-    lastScan: "1 day ago",
-    status: "critical",
-    issues: 8,
-  },
-];
-
 export function ProjectList() {
-  const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
   useEffect(() => {
@@ -78,53 +59,59 @@ export function ProjectList() {
 
   return (
     <div className="space-y-4">
-      <Card>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Repository</TableHead>
-              <TableHead>Last Scan</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {projects.map((project) => (
-              <TableRow key={project.id}>
-                <TableCell className="font-medium">{project.name}</TableCell>
-                <TableCell>{project.repository}</TableCell>
-                <TableCell>{project.lastScan}</TableCell>
-                <TableCell>
-                  <Badge
-                    variant={project.status === "critical" ? "destructive" : "outline"}
-                  >
-                    {project.issues} issues
-                  </Badge>
-                </TableCell>
-                <TableCell>
-                  <div className="flex gap-2">
-                    <Button 
-                      size="icon" 
-                      variant="ghost"
-                      onClick={() => setSelectedProject(project)}
-                      disabled={!project.code}
-                    >
-                      <Code className="h-4 w-4" />
-                    </Button>
-                    <Button size="icon" variant="ghost">
-                      <Play className="h-4 w-4" />
-                    </Button>
-                    <Button size="icon" variant="ghost">
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </TableCell>
+      {projects.length === 0 ? (
+        <Card className="p-6 text-center text-muted-foreground">
+          No projects yet. Add a project to begin scanning for vulnerabilities.
+        </Card>
+      ) : (
+        <Card>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Repository</TableHead>
+                <TableHead>Last Scan</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
+            </TableHeader>
+            <TableBody>
+              {projects.map((project) => (
+                <TableRow key={project.id}>
+                  <TableCell className="font-medium">{project.name}</TableCell>
+                  <TableCell>{project.repository}</TableCell>
+                  <TableCell>{project.lastScan}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={project.status === "critical" ? "destructive" : "outline"}
+                    >
+                      {project.issues} issues
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex gap-2">
+                      <Button 
+                        size="icon" 
+                        variant="ghost"
+                        onClick={() => setSelectedProject(project)}
+                        disabled={!project.code}
+                      >
+                        <Code className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost">
+                        <Play className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost">
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
 
       {selectedProject?.code && (
         <Card className="p-4">
