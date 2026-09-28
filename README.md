@@ -24,7 +24,7 @@ BugShield is a Next.js application for managing code projects, running heuristic
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 20.9.0 or newer (required by the installed Next.js version)
 - npm
 - PostgreSQL 14 or newer
 - A Clerk application with the Next.js integration enabled
@@ -39,15 +39,15 @@ Public GitHub repository scans use the GitHub API and do not require a token. Pr
    npm install
    ```
 
-2. Create `.env.local` in the project root with these variables:
+2. Create `.env.local` in the project root with the database URL and Clerk keys:
 
    ```dotenv
    DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/bugshield
-   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_replace_me
-   CLERK_SECRET_KEY=sk_test_replace_me
+   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_replace_with_your_clerk_publishable_key
+   CLERK_SECRET_KEY=sk_test_replace_with_your_clerk_secret_key
    ```
 
-   Use values from your own Clerk instance. Never commit `.env.local`, paste credentials into issue trackers, or reuse development credentials in production.
+   Replace the Clerk placeholders with keys from your own Clerk instance. The application currently reads only these three environment variables; the `NEXTAUTH_*` and GitHub OAuth variables are not required. Never commit `.env.local`, paste credentials into issue trackers, or reuse development credentials in production.
 
 3. Create a PostgreSQL database matching `DATABASE_URL`, then apply the Drizzle schema:
 
@@ -95,7 +95,6 @@ Drizzle schema definitions are in `lib/db/schema.ts`. The current schema include
 
 Schema migrations are under `lib/db/migrations`. `drizzle-kit push` is convenient for local development; use reviewed, versioned migrations for production deployment.
 
-## Production readiness
 
 This codebase should not be deployed for multiple real users until project and finding queries are scoped to an authenticated owner. The current schema has no owner/user ID on projects, and server actions can operate on globally queried project and finding records. Add ownership constraints and a reviewed migration before exposing user data.
 
@@ -125,3 +124,16 @@ lib/db/              Drizzle database connection, schema, and migrations
 lib/types/           Shared TypeScript types
 public/              Static assets
 ```
+
+## How the project works
+
+1. **Authentication:** Clerk provides sign-in and sign-up. Middleware protects application routes and sends signed-out visitors to sign-in.
+2. **Project submission:** A signed-in user adds a public GitHub repository URL or uploads a text source file from the Projects page.
+3. **Source collection:** For a GitHub URL, the server reads the repository's default branch through the GitHub API and downloads supported source/configuration files. For an upload, the file contents are sent to the server action.
+4. **Heuristic scan:** The server checks source lines against the scanner's built-in patterns for common risky code, such as dynamic evaluation, injection-like query construction, unsafe shell calls, and insecure configuration. A match becomes a finding with severity, source excerpt, and file/line location. These pattern matches require human review.
+5. **Persistence:** The app stores project data, scan history, and findings in PostgreSQL through Drizzle ORM.
+6. **Review and reporting:** The dashboard reads project and scan aggregates from the database. The Vulnerabilities page loads findings and supports search and filtering. Its report endpoint builds a PDF from stored findings, including a summary, findings register, evidence, and suggested remediation.
+
+Repository scans run synchronously during project submission or a manual rescan. There is currently no background job queue, automatic scheduled scanning, email notification delivery, or private-repository retrieval. The current database also does not associate records with an authenticated user; as noted above, enforce per-user ownership before using this application with multiple real users.
+
+
