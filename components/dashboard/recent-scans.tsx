@@ -2,58 +2,47 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import Link from "next/link";
 
 interface RecentScansProps {
   className?: string;
+  scans: Array<{
+    id: string;
+    projectName: string | null;
+    status: string | null;
+    startedAt: Date | null;
+    issues: number | null;
+  }>;
 }
 
-const recentScans = [
-  {
-    project: "Frontend App",
-    timestamp: "2 hours ago",
-    status: "completed",
-    issues: 12,
-  },
-  {
-    project: "API Service",
-    timestamp: "5 hours ago",
-    status: "completed",
-    issues: 3,
-  },
-  {
-    project: "Mobile App",
-    timestamp: "1 day ago",
-    status: "completed",
-    issues: 8,
-  },
-];
-
-export function RecentScans({ className }: RecentScansProps) {
+export function RecentScans({ className, scans }: RecentScansProps) {
   return (
     <Card className={className}>
       <CardHeader>
         <CardTitle>Recent Scans</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="space-y-8">
-          {recentScans.map((scan) => (
-            <div key={scan.project} className="flex items-center">
-              <div className="space-y-1 flex-1">
-                <p className="text-sm font-medium leading-none">
-                  {scan.project}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {scan.timestamp}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Badge variant={scan.issues > 5 ? "destructive" : "outline"}>
-                  {scan.issues} issues
+        {scans.length === 0 ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            No scans have run yet. <Link className="underline underline-offset-4" href="/projects">Add a project</Link> to start.
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {scans.map((scan) => (
+              <div key={scan.id} className="flex items-center gap-3">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <p className="truncate text-sm font-medium">{scan.projectName || "Deleted project"}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {scan.startedAt ? new Date(scan.startedAt).toLocaleString() : "Unknown time"}
+                  </p>
+                </div>
+                <Badge variant={scan.status === "failed" ? "destructive" : "outline"}>
+                  {scan.issues ?? 0} findings
                 </Badge>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

@@ -3,37 +3,26 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Shield, AlertTriangle, CheckCircle, GitFork } from "lucide-react";
 
-const stats = [
-  {
-    title: "Total Projects",
-    value: "12",
-    icon: GitFork,
-    description: "Active repositories",
-  },
-  {
-    title: "Critical Issues",
-    value: "9",
-    icon: AlertTriangle,
-    description: "Across all projects",
-  },
-  {
-    title: "Total Scans",
-    value: "482",
-    icon: Shield,
-    description: "Last 30 days",
-  },
-  {
-    title: "Resolved",
-    value: "89%",
-    icon: CheckCircle,
-    description: "Resolution rate",
-  },
-];
+interface ProjectStatsProps {
+  stats: {
+    projects: number;
+    openFindings: number;
+    scans: number;
+    resolvedRate: number;
+  };
+}
 
-export function ProjectStats() {
+export function ProjectStats({ stats }: ProjectStatsProps) {
+  const items = [
+    { title: "Total Projects", value: stats.projects, icon: GitFork, description: "Tracked repositories" },
+    { title: "Open Findings", value: stats.openFindings, icon: AlertTriangle, description: "Awaiting resolution" },
+    { title: "Total Scans", value: stats.scans, icon: Shield, description: "Recorded scan runs" },
+    { title: "Resolved", value: `${stats.resolvedRate}%`, icon: CheckCircle, description: "Of recorded findings" },
+  ];
+
   return (
     <>
-      {stats.map((stat) => (
+      {items.map((stat) => (
         <Card key={stat.title}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">

@@ -1,694 +1,253 @@
 import { NextResponse } from 'next/server';
 import { getVulnerabilities } from '@/app/actions/projects';
-import {
-  PDFDocument,
-  PDFPage,
-  RGB,
-  rgb,
-  StandardFonts,
-} from 'pdf-lib';
-import fs from 'fs/promises';
-import path from 'path';
+import { PDFDocument, StandardFonts, rgb, type PDFPage, type PDFFont, type RGB } from 'pdf-lib';
+
+const PAGE_WIDTH = 595.28;
+const PAGE_HEIGHT = 841.89;
+const MARGIN = 48;
+const COLORS = {
+  navy: rgb(0.07, 0.16, 0.25),
+  ink: rgb(0.13, 0.17, 0.2),
+  muted: rgb(0.39, 0.44, 0.48),
+  line: rgb(0.83, 0.87, 0.89),
+  panel: rgb(0.95, 0.96, 0.97),
+  white: rgb(1, 1, 1),
+};
+
+function wrapText(text: string, font: PDFFont, size: number, maxWidth: number) {
+  const lines: string[] = [];
+  for (const paragraph of text.split('\n')) {
+    if (!paragraph.trim()) {
+      lines.push('');
+      continue;
+    }
+    let line = '';
+    for (const word of paragraph.split(/\s+/)) {
+      const next = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(next, size) > maxWidth && line) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = next;
+      }
+    }
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+function drawTextBlock(
+  page: PDFPage,
+  text: string,
+  options: { x: number; y: number; width: number; size: number; font: PDFFont; color: RGB; lineHeight?: number },
+) {
+  const { x, width, size, font, color, lineHeight = size * 1.45 } = options;
+  let y = options.y;
+  for (const line of wrapText(text, font, size, width)) {
+    if (y < 54) break;
+    if (line) page.drawText(line, { x, y, size, font, color });
+    y -= lineHeight;
+  }
+  return y;
+}
+
+function cleanPdfText(text: string) {
+  return text
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '?')
+    .replace(/\t/g, '  ');
+}
+
+function titleCase(value: string | null) {
+  return (value || 'Unknown').replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function getSeverityColor(severity: string | null): RGB {
+  switch ((severity || '').toLowerCase()) {
+    case 'critical': return rgb(0.72, 0.08, 0.12);
+    case 'high': return rgb(0.82, 0.28, 0.08);
+    case 'medium': return rgb(0.7, 0.48, 0.03);
+    case 'low': return rgb(0.08, 0.38, 0.57);
+    default: return rgb(0.32, 0.36, 0.4);
+  }
+}
+
+function drawPageHeader(page: PDFPage, bold: PDFFont, regular: PDFFont, section: string) {
+  page.drawRectangle({ x: 0, y: PAGE_HEIGHT - 48, width: PAGE_WIDTH, height: 48, color: COLORS.navy });
+  page.drawText('BUGSHIELD', { x: MARGIN, y: PAGE_HEIGHT - 30, size: 10, font: bold, color: COLORS.white });
+  page.drawText(section.toUpperCase(), { x: PAGE_WIDTH - MARGIN - regular.widthOfTextAtSize(section.toUpperCase(), 8), y: PAGE_HEIGHT - 30, size: 8, font: regular, color: rgb(0.78, 0.86, 0.9) });
+}
+
+function drawPageFooter(page: PDFPage, regular: PDFFont, pageNumber: number) {
+  page.drawLine({ start: { x: MARGIN, y: 40 }, end: { x: PAGE_WIDTH - MARGIN, y: 40 }, thickness: 0.7, color: COLORS.line });
+  page.drawText('CONFIDENTIAL  |  Pattern-based security assessment', { x: MARGIN, y: 25, size: 7, font: regular, color: COLORS.muted });
+  const label = `Page ${pageNumber}`;
+  page.drawText(label, { x: PAGE_WIDTH - MARGIN - regular.widthOfTextAtSize(label, 8), y: 25, size: 8, font: regular, color: COLORS.muted });
+}
+
+function recommendationFor(title: string) {
+  const normalized = title.toLowerCase();
+  if (normalized.includes('sql') || normalized.includes('nosql')) return 'Use parameterized queries or the database driver query builder. Validate input, but do not rely on input filtering as the primary defense.';
+  if (normalized.includes('html') || normalized.includes('cross-site scripting') || normalized.includes('xss')) return 'Avoid writing untrusted values to HTML. Use framework escaping or safe text APIs; sanitize only when rendering intentional HTML.';
+  if (normalized.includes('shell') || normalized.includes('command')) return 'Avoid shell execution. Use a process API with a fixed executable and separate argument array, and validate allowed arguments.';
+  if (normalized.includes('path traversal') || normalized.includes('file inclusion')) return 'Resolve paths against an allowed base directory, reject traversal outside it, and use an allowlist of permitted files.';
+  if (normalized.includes('server-side request forgery') || normalized.includes('ssrf')) return 'Allowlist trusted hosts and schemes, reject private/link-local IP ranges, and validate the final resolved destination after redirects.';
+  if (normalized.includes('credential')) return 'Revoke and rotate the exposed credential. Load secrets from a managed secret store or environment configuration and keep them out of source control.';
+  if (normalized.includes('deserialization')) return 'Do not deserialize untrusted data with unsafe object-capable formats. Use a safe parser and validate the resulting schema.';
+  if (normalized.includes('xxe') || normalized.includes('xml')) return 'Disable external entity and DTD processing in the XML parser, or use a hardened parser configuration.';
+  if (normalized.includes('tls') || normalized.includes('cors') || normalized.includes('cookie')) return 'Use secure production defaults and explicitly restrict trusted origins, TLS verification, and cookie flags.';
+  if (normalized.includes('random')) return 'Use a cryptographically secure random number generator for tokens, keys, and security-sensitive identifiers.';
+  if (normalized.includes('redirect')) return 'Validate redirect destinations against a strict allowlist or accept only local relative paths.';
+  if (normalized.includes('memory')) return 'Use bounds-checked APIs and validate buffer lengths before copying or formatting data.';
+  return 'Review the data flow at this location, validate untrusted input, and use the platform’s safe API for this operation.';
+}
 
 export async function GET() {
   try {
     const vulnerabilities = await getVulnerabilities();
-    
-    const doc = await PDFDocument.create();
-    
-    // Embed fonts properly
-    const helvetica = await doc.embedFont(StandardFonts.Helvetica);
-    const helveticaBold = await doc.embedFont(StandardFonts.HelveticaBold);
-    
-    // Load and embed the local JPEG logo from /public/logo.jpg
-    const logoPath = path.join(process.cwd(), 'public', 'logo.jpeg');
-    const logoImageBytes = await fs.readFile(logoPath);
-    const logoImage = await doc.embedJpg(logoImageBytes);
-
-    // Colors
-    const darkBlue = rgb(0.07, 0.15, 0.34);
-    const lightBlue = rgb(0.85, 0.9, 0.95);
-    const white = rgb(1, 1, 1);
-    const black = rgb(0, 0, 0);
-    const lightGray = rgb(0.95, 0.95, 0.95);
-    const mediumGray = rgb(0.8, 0.8, 0.8);
-    const darkGray = rgb(0.4, 0.4, 0.4);
-    
-    // Severity colors
-    type SeverityType = 'Critical' | 'High' | 'Medium' | 'Low' | 'Info';
-    const severityColors: Record<SeverityType, RGB> = {
-      'Critical': rgb(0.8, 0.1, 0.1),
-      'High': rgb(0.9, 0.4, 0.1),
-      'Medium': rgb(0.95, 0.74, 0.2),
-      'Low': rgb(0.3, 0.6, 0.9),
-      'Info': rgb(0.5, 0.5, 0.5)
+    const pdf = await PDFDocument.create();
+    const regular = await pdf.embedFont(StandardFonts.Helvetica);
+    const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const counts = {
+      critical: vulnerabilities.filter((item) => item.severity.toLowerCase() === 'critical').length,
+      high: vulnerabilities.filter((item) => item.severity.toLowerCase() === 'high').length,
+      medium: vulnerabilities.filter((item) => item.severity.toLowerCase() === 'medium').length,
+      low: vulnerabilities.filter((item) => item.severity.toLowerCase() === 'low').length,
     };
-    
-    type StatusType = 'Open' | 'In Progress' | 'Fixed' | 'Closed' | 'Won\'t Fix';
-    const statusColors: Record<StatusType, RGB> = {
-      'Open': rgb(0.8, 0.1, 0.1),
-      'In Progress': rgb(0.95, 0.74, 0.2),
-      'Fixed': rgb(0.2, 0.7, 0.2),
-      'Closed': rgb(0.5, 0.5, 0.5),
-      'Won\'t Fix': rgb(0.4, 0.4, 0.6)
-    };
+    const repositories = [...new Set(vulnerabilities.map((item) => item.repository).filter(Boolean))];
 
-    // Helper function for text wrapping that handles newlines
-    const drawWrappedText = (page: PDFPage, text: string, options: { x: any; y: any; width: any; size: any; font: any; color: any; lineHeight: any; }) => {
-      const { x, y, width, size, font, color, lineHeight } = options;
-      
-      // Handle null/undefined text
-      if (!text) return y;
-      
-      // Split text into lines first
-      const textLines = text.split('\n');
-      let currentY = y;
-      
-      for (const textLine of textLines) {
-        const words = textLine.split(' ');
-        let line = '';
-        
-        for (const word of words) {
-          const testLine = line + (line ? ' ' : '') + word;
-          const testWidth = font.widthOfTextAtSize(testLine, size);
-          
-          if (testWidth > width && line !== '') {
-            page.drawText(line.trim(), { x, y: currentY, size, font, color });
-            line = word;
-            currentY -= lineHeight;
-          } else {
-            line = testLine;
-          }
+    let page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    page.drawRectangle({ x: 0, y: PAGE_HEIGHT - 202, width: PAGE_WIDTH, height: 202, color: COLORS.navy });
+    page.drawText('BUGSHIELD  /  SECURITY ASSESSMENT', { x: MARGIN, y: PAGE_HEIGHT - 54, size: 9, font: bold, color: rgb(0.72, 0.84, 0.88) });
+    page.drawText('Vulnerability Report', { x: MARGIN, y: PAGE_HEIGHT - 106, size: 30, font: bold, color: COLORS.white });
+    page.drawText('Repository code review', { x: MARGIN, y: PAGE_HEIGHT - 134, size: 12, font: regular, color: rgb(0.87, 0.91, 0.93) });
+    page.drawText(`Generated ${new Date().toLocaleString()}`, { x: MARGIN, y: PAGE_HEIGHT - 170, size: 9, font: regular, color: rgb(0.78, 0.85, 0.88) });
+
+    page.drawText('EXECUTIVE SUMMARY', { x: MARGIN, y: PAGE_HEIGHT - 244, size: 10, font: bold, color: COLORS.navy });
+    page.drawText(`${vulnerabilities.length} findings`, { x: MARGIN, y: PAGE_HEIGHT - 278, size: 23, font: bold, color: COLORS.ink });
+    page.drawText(`Across ${repositories.length} ${repositories.length === 1 ? 'repository' : 'repositories'}`, { x: MARGIN, y: PAGE_HEIGHT - 299, size: 9, font: regular, color: COLORS.muted });
+
+    const severityEntries = Object.entries(counts);
+    const cardGap = 10;
+    const cardWidth = (PAGE_WIDTH - MARGIN * 2 - cardGap * 3) / 4;
+    const cardY = PAGE_HEIGHT - 382;
+    severityEntries.forEach(([severity, amount], index) => {
+      const x = MARGIN + index * (cardWidth + cardGap);
+      const severityColor = getSeverityColor(severity);
+      page.drawRectangle({ x, y: cardY, width: cardWidth, height: 58, color: COLORS.panel });
+      page.drawRectangle({ x, y: cardY, width: 3, height: 58, color: severityColor });
+      page.drawText(titleCase(severity).toUpperCase(), { x: x + 12, y: cardY + 36, size: 7, font: bold, color: COLORS.muted });
+      page.drawText(String(amount), { x: x + 12, y: cardY + 13, size: 18, font: bold, color: severityColor });
+    });
+
+    page.drawText('SCAN SCOPE', { x: MARGIN, y: cardY - 32, size: 9, font: bold, color: COLORS.navy });
+    const scopeText = repositories.length ? repositories.join('\n') : 'No repository findings are currently recorded.';
+    const scopeEndY = drawTextBlock(page, cleanPdfText(scopeText), {
+      x: MARGIN, y: cardY - 53, width: PAGE_WIDTH - MARGIN * 2, size: 9, font: regular, color: COLORS.ink, lineHeight: 13,
+    });
+    drawTextBlock(page, 'This report contains automated pattern-based findings. Validate each item in context before making remediation decisions.', {
+      x: MARGIN, y: Math.min(scopeEndY - 20, 112), width: PAGE_WIDTH - MARGIN * 2, size: 8, font: regular, color: COLORS.muted,
+    });
+
+    if (vulnerabilities.length === 0) {
+      page.drawRectangle({ x: MARGIN, y: PAGE_HEIGHT - 490, width: PAGE_WIDTH - MARGIN * 2, height: 58, color: COLORS.panel });
+      page.drawText('No vulnerability findings were recorded for this report.', { x: MARGIN + 14, y: PAGE_HEIGHT - 466, size: 10, font: regular, color: COLORS.ink });
+    }
+    drawPageFooter(page, regular, 1);
+
+    if (vulnerabilities.length > 0) {
+      page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      drawPageHeader(page, bold, regular, 'Findings register');
+      page.drawText('FINDINGS REGISTER', { x: MARGIN, y: PAGE_HEIGHT - 82, size: 16, font: bold, color: COLORS.ink });
+      page.drawText('Prioritized list of detected issues', { x: MARGIN, y: PAGE_HEIGHT - 101, size: 9, font: regular, color: COLORS.muted });
+      let registerY = PAGE_HEIGHT - 136;
+      const rowHeight = 49;
+      vulnerabilities.forEach((finding, index) => {
+        if (registerY < 90) {
+          drawPageFooter(page, regular, pdf.getPageCount());
+          page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+          drawPageHeader(page, bold, regular, 'Findings register');
+          registerY = PAGE_HEIGHT - 82;
         }
-        
-        if (line) {
-          page.drawText(line.trim(), { x, y: currentY, size, font, color });
-          currentY -= lineHeight;
-        }
-      }
-      
-      return currentY;
-    };
+        const rowBottom = registerY - rowHeight + 5;
+        if (index % 2 === 0) page.drawRectangle({ x: MARGIN, y: rowBottom, width: PAGE_WIDTH - MARGIN * 2, height: rowHeight, color: COLORS.panel });
+        page.drawRectangle({ x: MARGIN, y: rowBottom, width: 3, height: rowHeight, color: getSeverityColor(finding.severity) });
+        page.drawText(`${String(index + 1).padStart(2, '0')}  ${cleanPdfText(finding.title).slice(0, 68)}`, { x: MARGIN + 12, y: registerY - 12, size: 9, font: bold, color: COLORS.ink });
+        page.drawText(`${titleCase(finding.severity)}  |  ${cleanPdfText(finding.location || 'Location not recorded').slice(0, 75)}`, { x: MARGIN + 12, y: registerY - 27, size: 7, font: regular, color: COLORS.muted });
+        page.drawText(`Detail ${index + 1}`, { x: PAGE_WIDTH - MARGIN - 52, y: registerY - 12, size: 7, font: regular, color: COLORS.navy });
+        registerY -= rowHeight + 4;
+      });
+      drawPageFooter(page, regular, pdf.getPageCount());
+    }
 
-    const drawRoundedRect = (page: PDFPage, { x, y, width, height, color, radius = 0, borderColor, borderWidth = 0 }: { x: number; y: number; width: number; height: number; color: RGB; radius: number; borderColor?: RGB; borderWidth?: number; }) => {
-      // If no radius specified, draw a regular rectangle
-      if (radius === 0) {
-        page.drawRectangle({ x, y, width, height, color, borderColor, borderWidth });
-        return;
-      }
-      
-      // Draw main rectangle (slightly smaller to account for rounded corners)
-      page.drawRectangle({
-        x: x + radius,
-        y: y,
-        width: width - 2 * radius,
-        height: height,
-        color
-      });
-      
-      // Draw horizontal rectangles for left and right sides
-      page.drawRectangle({
-        x: x,
-        y: y + radius,
-        width: radius,
-        height: height - 2 * radius,
-        color
-      });
-      
-      page.drawRectangle({
-        x: x + width - radius,
-        y: y + radius,
-        width: radius,
-        height: height - 2 * radius,
-        color
-      });
-      
-      // Draw four corner circles
-      const corners = [
-        { cx: x + radius, cy: y + radius },                   // bottom-left
-        { cx: x + width - radius, cy: y + radius },           // bottom-right
-        { cx: x + radius, cy: y + height - radius },          // top-left
-        { cx: x + width - radius, cy: y + height - radius }   // top-right
+    vulnerabilities.forEach((finding, index) => {
+      page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      const severity = titleCase(finding.severity);
+      const severityColor = getSeverityColor(finding.severity);
+      drawPageHeader(page, bold, regular, `Finding ${String(index + 1).padStart(2, '0')}`);
+
+      let y = PAGE_HEIGHT - 82;
+      page.drawRectangle({ x: MARGIN, y: y - 26, width: 3, height: 38, color: severityColor });
+      y = drawTextBlock(page, cleanPdfText(finding.title), { x: MARGIN + 13, y, width: PAGE_WIDTH - MARGIN * 2 - 100, size: 17, font: bold, color: COLORS.ink, lineHeight: 21 });
+      page.drawRectangle({ x: PAGE_WIDTH - MARGIN - 86, y: y + 4, width: 86, height: 20, color: severityColor });
+      const severityLabel = severity.toUpperCase();
+      page.drawText(severityLabel, { x: PAGE_WIDTH - MARGIN - 43 - bold.widthOfTextAtSize(severityLabel, 8) / 2, y: y + 10, size: 8, font: bold, color: COLORS.white });
+      y -= 18;
+
+      const metadata = [
+        ['PROJECT', finding.repository || 'Unknown project'],
+        ['STATUS', titleCase(finding.status)],
+        ['SOURCE LOCATION', finding.location || 'Location not recorded'],
       ];
-      
-      corners.forEach(corner => {
-        page.drawCircle({
-          x: corner.cx,
-          y: corner.cy,
-          size: radius,
-          color
-        });
-      });
-      
-      // Add border if specified
-      if (borderColor && borderWidth > 0) {
-        // Draw border lines (this is simplified and won't perfectly match rounded corners)
-        // Top
-        page.drawLine({
-          start: { x: x + radius, y: y + height },
-          end: { x: x + width - radius, y: y + height },
-          thickness: borderWidth,
-          color: borderColor
-        });
-        
-        // Bottom
-        page.drawLine({
-          start: { x: x + radius, y: y },
-          end: { x: x + width - radius, y: y },
-          thickness: borderWidth,
-          color: borderColor
-        });
-        
-        // Left
-        page.drawLine({
-          start: { x: x, y: y + radius },
-          end: { x: x, y: y + height - radius },
-          thickness: borderWidth,
-          color: borderColor
-        });
-        
-        // Right
-        page.drawLine({
-          start: { x: x + width, y: y + radius },
-          end: { x: x + width, y: y + height - radius },
-          thickness: borderWidth,
-          color: borderColor
-        });
-      }
-    };
-    
-    // Create cover page
-    let page = doc.addPage([595.28, 841.89]); // A4 size
-    
-    // Add solid header with more height
-    page.drawRectangle({
-      x: 0,
-      y: page.getHeight() - 350, // Increased height
-      width: page.getWidth(),
-      height: 350,
-      color: darkBlue,
-    });
-
-    // Draw logo instead of placeholder
-    page.drawImage(logoImage, {
-      x: 50,
-      y: page.getHeight() - 120,
-      width: 80,
-      height: 80,
-    });
-
-    // Remove the old company text that was in the placeholder
-    // Delete or comment out this section:
-    /*
-    page.drawText('COMPANY', {
-      x: 60,
-      y: page.getHeight() - 85,
-      size: 14,
-      font: helveticaBold,
-      color: darkGray,
-    });
-    */
-
-    // Add title with better spacing and alignment
-    const title1Width = helveticaBold.widthOfTextAtSize('SECURE CODE REVIEW', 42); // Increased font size
-    const title2Width = helveticaBold.widthOfTextAtSize('VULNERABILITY REPORT', 42);
-    const centerX = page.getWidth() / 2;
-
-    // Moved titles up
-    page.drawText('SECURE CODE REVIEW', {
-      x: centerX - (title1Width / 2),
-      y: page.getHeight() - 180,
-      size: 42,
-      font: helveticaBold,
-      color: white,
-    });
-
-    page.drawText('VULNERABILITY REPORT', {
-      x: centerX - (title2Width / 2),
-      y: page.getHeight() - 240,
-      size: 42,
-      font: helveticaBold,
-      color: white,
-    });
-
-    // Add date with adjusted positioning
-    const date = new Date().toLocaleDateString('en-US', { 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric' 
-    });
-
-    page.drawText(`Report Generated: ${date}`, {
-      x: centerX - (helvetica.widthOfTextAtSize(`Report Generated: ${date}`, 12) / 2),
-      y: page.getHeight() - 320,
-      size: 12,
-      font: helvetica,
-      color: lightGray,
-    });
-
-    // Add summary box with adjusted positioning and increased height
-    drawRoundedRect(page, {
-      x: 50,
-      y: page.getHeight() - 520, // Moved down
-      width: page.getWidth() - 100,
-      height: 150, // Increased height
-      color: lightBlue,
-      radius: 8,
-      borderColor: darkBlue,
-      borderWidth: 1
-    });
-
-    // Summary header with adjusted positioning
-    page.drawText('EXECUTIVE SUMMARY', {
-      x: 70,
-      y: page.getHeight() - 460, // Adjusted position
-      size: 16,
-      font: helveticaBold,
-      color: darkBlue,
-    });
-
-    // Statistics grid with better spacing and adjusted positioning
-    const stats = [
-      { label: 'Total Vulnerabilities', value: vulnerabilities.length },
-      { label: 'Critical', value: vulnerabilities.filter(v => v.severity === 'Critical').length },
-      { label: 'High', value: vulnerabilities.filter(v => v.severity === 'High').length },
-      { label: 'Medium', value: vulnerabilities.filter(v => v.severity === 'Medium').length },
-      { label: 'Low', value: vulnerabilities.filter(v => v.severity === 'Low').length }
-    ];
-
-    // Convert cm to PDF points (1 cm ≈ 28.346 points)
-    const moveLeft = 28.346 * 1.5; // 1.5 cm left
-    const moveDown = 28.346 * 7;   // Increased to 7 cm down (from 6)
-
-    // Calculate total width of all boxes and spacing
-    const boxWidth = 90;
-    const boxSpacing = 20; // Space between boxes
-    const totalBoxes = stats.length;
-    const totalWidth = (boxWidth * totalBoxes) + (boxSpacing * (totalBoxes - 1));
-    
-    // Calculate starting X position to center the boxes
-    let statX = centerX - (totalWidth / 2);
-    let statY = page.getHeight() - 650;
-
-    // Draw stats grid title centered
-    const titleWidth = helveticaBold.widthOfTextAtSize('VULNERABILITY STATISTICS', 14);
-    page.drawText('VULNERABILITY STATISTICS', {
-      x: centerX - (titleWidth / 2),
-      y: statY + 60,
-      size: 14,
-      font: helveticaBold,
-      color: darkBlue,
-    });
-
-    stats.forEach((stat, index) => {
-      const boxColor = index === 0 ? darkBlue : 
-        severityColors[stat.label as SeverityType] || darkGray;
-      
-      // Centered boxes with consistent spacing
-      drawRoundedRect(page, {
-        x: statX,
-        y: statY - 5,
-        width: boxWidth,
-        height: 40,
-        color: rgb(0.98, 0.98, 0.98),
-        radius: 4,
-        borderColor: boxColor,
-        borderWidth: 1.5
-      });
-
-      // Center the value in the box
-      const valueWidth = helveticaBold.widthOfTextAtSize(stat.value.toString(), 20);
-      page.drawText(stat.value.toString(), {
-        x: statX + (boxWidth - valueWidth) / 2,
-        y: statY + 12,
-        size: 20,
-        font: helveticaBold,
-        color: boxColor,
-      });
-
-      // Center the label text
-      const labelWidth = helvetica.widthOfTextAtSize(stat.label, 9);
-      page.drawText(stat.label, {
-        x: statX + (boxWidth - labelWidth) / 2,
-        y: statY - 3,
-        size: 9,
-        font: helvetica,
-        color: darkGray,
-      });
-
-      statX += boxWidth + boxSpacing; // Move to next box position with spacing
-    });
-
-    // Add company name at bottom (single instance)
-    const companyText = 'BugShield';
-    const companyTextWidth = helveticaBold.widthOfTextAtSize(companyText, 28); // Increased size
-    
-    // Single company name with better positioning
-    page.drawText(companyText, {
-      x: centerX - (companyTextWidth / 2),
-      y: 100,
-      size: 28,
-      font: helveticaBold,
-      color: darkBlue,
-    });
-
-    // Add subtle divider line above company name
-    page.drawLine({
-      start: { x: centerX - 100, y: 140 },
-      end: { x: centerX + 100, y: 140 },
-      thickness: 1,
-      color: mediumGray,
-    });
-
-    // Add footer
-    page.drawRectangle({
-      x: 0,
-      y: 0,
-      width: page.getWidth(),
-      height: 50,
-      color: darkBlue,
-    });
-
-    const confidentialText = 'CONFIDENTIAL';
-    page.drawText(confidentialText, {
-      x: centerX - (helveticaBold.widthOfTextAtSize(confidentialText, 12) / 2),
-      y: 20,
-      size: 12,
-      font: helveticaBold,
-      color: white,
-    });
-
-    // Add table of contents page
-    page = doc.addPage([595.28, 841.89]);
-    
-    // Header
-    page.drawRectangle({
-      x: 0,
-      y: page.getHeight() - 60,
-      width: page.getWidth(),
-      height: 60,
-      color: darkBlue,
-    });
-    
-    page.drawText('TABLE OF CONTENTS', {
-      x: 50,
-      y: page.getHeight() - 35,
-      size: 18,
-      font: helveticaBold,
-      color: white,
-    });
-
-    // List all findings
-    let tocY = page.getHeight() - 100;
-    
-    page.drawText('Executive Summary', {
-      x: 50,
-      y: tocY,
-      size: 14,
-      font: helveticaBold,
-      color: darkBlue,
-    });
-    
-    page.drawText('Page 1', {
-      x: page.getWidth() - 80,
-      y: tocY,
-      size: 12,
-      font: helvetica,
-      color: black,
-    });
-    
-    tocY -= 20;
-    
-    vulnerabilities.forEach((vuln, index) => {
-      const color = severityColors[vuln.severity as SeverityType] || darkGray;
-      
-      // Draw severity indicator
-      page.drawRectangle({
-        x: 45,
-        y: tocY - 5,
-        width: 10,
-        height: 10,
-        color,
-      });
-      
-      page.drawText(`Finding ${index + 1}: ${vuln.title}`, {
-        x: 65,
-        y: tocY,
-        size: 12,
-        font: helvetica,
-        color: black,
-      });
-      
-      page.drawText(`Page ${index + 3}`, {
-        x: page.getWidth() - 80,
-        y: tocY,
-        size: 12,
-        font: helvetica,
-        color: black,
-      });
-      
-      tocY -= 25;
-      
-      // Add new page if needed
-      if (tocY < 100) {
-        page = doc.addPage([595.28, 841.89]);
-        
-        // Header
-        page.drawRectangle({
-          x: 0,
-          y: page.getHeight() - 60,
-          width: page.getWidth(),
-          height: 60,
-          color: darkBlue,
-        });
-        
-        page.drawText('TABLE OF CONTENTS (CONTINUED)', {
-          x: 50,
-          y: page.getHeight() - 35,
-          size: 18,
-          font: helveticaBold,
-          color: white,
-        });
-        
-        tocY = page.getHeight() - 100;
-      }
-    });
-
-    // Add footer
-    page.drawRectangle({
-      x: 0,
-      y: 0,
-      width: page.getWidth(),
-      height: 40,
-      color: darkBlue,
-    });
-    
-    page.drawText('CONFIDENTIAL', {
-      x: page.getWidth() / 2 - 40,
-      y: 15,
-      size: 12,
-      font: helveticaBold,
-      color: white,
-    });
-
-    // Draw each vulnerability on a new page
-    vulnerabilities.forEach((vuln, index) => {
-      page = doc.addPage([595.28, 841.89]);
-      
-      // Page header with minimal info
-      page.drawRectangle({
-        x: 0,
-        y: page.getHeight() - 60,
-        width: page.getWidth(),
-        height: 60,
-        color: darkBlue,
-      });
-      
-      // Finding number (simplified)
-      page.drawText(`Finding ${index + 1}`, {
-        x: 50,
-        y: page.getHeight() - 35,
-        size: 16,
-        font: helveticaBold,
-        color: white,
-      });
-
-      let y = page.getHeight() - 100;
-
-      // Title section with more spacing
-      drawRoundedRect(page, {
-        x: 40,
-        y: y - 20,
-        width: page.getWidth() - 80,
-        height: 50,
-        color: lightBlue,
-        radius: 5
-      });
-      
-      page.drawText(vuln.title, {
-        x: 50,
-        y: y,
-        size: 16,
-        font: helveticaBold,
-        color: darkBlue,
-      });
-      
-      y -= 90; // Increased spacing after title
-
-      // Metadata boxes with better layout
-      const metaBoxWidth = (page.getWidth() - 120) / 2;
-      
-      // Severity box
-      drawRoundedRect(page, {
-        x: 50,
-        y: y,
-        width: metaBoxWidth,
-        height: 60,
-        color: lightGray,
-        radius: 5
-      });
-      
-      const severityColor = severityColors[vuln.severity as SeverityType] || darkGray;
-      page.drawText(vuln.severity || 'Unknown', {
-        x: 70,
-        y: y + 20,
-        size: 14,
-        font: helveticaBold,
-        color: severityColor,
-      });
-
-      // Status box
-      drawRoundedRect(page, {
-        x: 70 + metaBoxWidth,
-        y: y,
-        width: metaBoxWidth,
-        height: 60,
-        color: lightGray,
-        radius: 5
-      });
-      
-      const statusColor = statusColors[(vuln.status as StatusType) ?? 'Closed'] || darkGray;
-      page.drawText(vuln.status || 'Unknown', {
-        x: 90 + metaBoxWidth,
-        y: y + 20,
-        size: 14,
-        font: helveticaBold,
-        color: statusColor,
-      });
-      
-      y -= 90; // Increased spacing after metadata
-
-      // Location with cleaner design
-      if (vuln.location) {
-        page.drawText('Location', {
-          x: 50,
-          y: y,
-          size: 12,
-          font: helveticaBold,
-          color: darkBlue,
-        });
-        
-        y -= 25;
-        
-        page.drawText(vuln.location, {
-          x: 50,
-          y,
-          size: 11,
-          font: helvetica,
-          color: black,
-        });
-        
-        y -= 40;
+      for (const [label, value] of metadata) {
+        page.drawText(label, { x: MARGIN, y, size: 7, font: bold, color: COLORS.muted });
+        y -= 14;
+        y = drawTextBlock(page, cleanPdfText(value), { x: MARGIN, y, width: PAGE_WIDTH - MARGIN * 2, size: 9, font: regular, color: COLORS.ink, lineHeight: 12 });
+        y -= 9;
       }
 
-      // Description with better formatting
-      if (vuln.description) {
-        page.drawText('Description', {
-          x: 50,
-          y,
-          size: 12,
-          font: helveticaBold,
-          color: darkBlue,
-        });
-        
-        y -= 25;
-        
-        // Clean up description text
-        const cleanDescription = vuln.description
-          .replace(/[\u{0080}-\u{FFFF}]/gu, '') // Remove unsupported chars
-          .replace(/\*\*/g, '') // Remove markdown bold
-          .replace(/```[^`]*```/g, '') // Remove code blocks
-          .split('\n')
-          .filter(line => line.trim()) // Remove empty lines
-          .join('\n\n'); // Add paragraph spacing
-        
-        y = drawWrappedText(page, cleanDescription, {
-          x: 50,
-          y,
-          width: page.getWidth() - 120, // Increased margins
-          size: 11,
-          font: helvetica,
-          color: black,
-          lineHeight: 18 // Increased line height
-        });
-        
-        y -= 40;
-      }
-
-      // Recommendations with better spacing
-      if (vuln.description) { // Using description field instead since recommendations is not available
-        page.drawText('Recommendations', {
-          x: 50,
-          y,
-          size: 12,
-          font: helveticaBold,
-          color: darkBlue,
-        });
-        
-        y -= 25;
-        
-        const cleanRecommendations = (vuln.description || '')
-          .replace(/[\u{0080}-\u{FFFF}]/gu, '')
-          .replace(/\d+\.\s+/g, '• ') 
-          .split('\n')
-          .filter(line => line.trim())
-          .join('\n\n');
-        
-        drawWrappedText(page, cleanRecommendations, {
-          x: 50,
-          y,
-          width: page.getWidth() - 120,
-          size: 11,
-          font: helvetica,
-          color: black,
-          lineHeight: 18
-        });
-      }
-
-      // Minimal footer
-      page.drawRectangle({
-        x: 0,
-        y: 0,
-        width: page.getWidth(),
-        height: 30,
-        color: darkBlue,
+      page.drawLine({ start: { x: MARGIN, y: y + 4 }, end: { x: PAGE_WIDTH - MARGIN, y: y + 4 }, thickness: 0.6, color: COLORS.line });
+      y -= 14;
+      page.drawText('ASSESSMENT', { x: MARGIN, y, size: 8, font: bold, color: COLORS.navy });
+      y -= 17;
+      y = drawTextBlock(page, cleanPdfText(finding.description || 'No explanation was provided by the scanner.'), {
+        x: MARGIN, y, width: PAGE_WIDTH - MARGIN * 2, size: 9, font: regular, color: COLORS.ink,
       });
+      y -= 14;
+
+      page.drawText('EVIDENCE  /  MATCHED SOURCE', { x: MARGIN, y, size: 8, font: bold, color: COLORS.navy });
+      y -= 15;
+      const codeLines = cleanPdfText(finding.code || 'No source excerpt was saved.').split('\n').slice(0, 8);
+      const codeHeight = Math.max(40, codeLines.length * 11 + 16);
+      page.drawRectangle({ x: MARGIN, y: y - codeHeight + 7, width: PAGE_WIDTH - MARGIN * 2, height: codeHeight, color: COLORS.panel });
+      for (const codeLine of codeLines) {
+        if (y < 65) break;
+        const fittedLine = wrapText(codeLine, regular, 7, PAGE_WIDTH - MARGIN * 2 - 24)[0] ?? '';
+        page.drawText(fittedLine.slice(0, 125), { x: MARGIN + 12, y, size: 7, font: regular, color: COLORS.ink });
+        y -= 11;
+      }
+      y -= 13;
+
+      if (y > 80) {
+        page.drawText('RECOMMENDED REMEDIATION', { x: MARGIN, y, size: 8, font: bold, color: COLORS.navy });
+        y -= 16;
+        drawTextBlock(page, recommendationFor(finding.title), {
+          x: MARGIN, y, width: PAGE_WIDTH - MARGIN * 2, size: 9, font: regular, color: COLORS.ink,
+        });
+      }
+      drawPageFooter(page, regular, pdf.getPageCount());
     });
 
-    // Save the PDF
-    const pdfBytes = await doc.save();
-    const pdfBody = new Uint8Array(pdfBytes).buffer;
-
-    return new NextResponse(pdfBody, {
+    const pdfBytes = await pdf.save();
+    return new NextResponse(new Uint8Array(pdfBytes), {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename="vulnerability-report.pdf"',
+        'Content-Disposition': 'attachment; filename="bugshield-vulnerability-report.pdf"',
+        'Cache-Control': 'no-store',
       },
     });
-
   } catch (error) {
     console.error('PDF Generation Error:', error);
-    return new NextResponse('Internal Error', { status: 500 });
+    return new NextResponse('Unable to generate vulnerability report.', { status: 500 });
   }
 }

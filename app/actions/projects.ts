@@ -1,6 +1,7 @@
 'use server'
 
 import { eq } from 'drizzle-orm'
+import { count, desc, gte } from 'drizzle-orm'
 import { db } from '@/lib/db'
 import { projects, scans, vulnerabilities } from '@/lib/db/schema'
 import type { CreateProjectData } from '@/lib/types/project'
@@ -165,6 +166,97 @@ export async function getVulnerabilities() {
   }).from(vulnerabilities).leftJoin(projects, eq(vulnerabilities.projectId, projects.id));
 }
 
+export async function getDashboardData() {
+  const [projectCount] = await db.select({ value: count() }).from(projects);
+  const [openCount] = await db.select({ value: count() }).from(vulnerabilities).where(eq(vulnerabilities.status, 'open'));
+  const [scanCount] = await db.select({ value: count() }).from(scans);
+  const [resolvedCount] = await db.select({ value: count() }).from(vulnerabilities).where(eq(vulnerabilities.status, 'fixed'));
+  const [allFindings] = await db.select({ value: count() }).from(vulnerabilities);
+
+  const recentProjects = await db.select({
+    id: projects.id,
+    name: projects.name,
+    repository: projects.repository,
+    status: projects.status,
+    issues: projects.issues,
+    lastScan: projects.lastScan,
+  }).from(projects).orderBy(desc(projects.lastScan)).limit(6);
+  const scannedProjectRows = await db.select({
+    id: projects.id,
+    name: projects.name,
+    issues: projects.issues,
+    lastScan: projects.lastScan,
+  }).from(projects).where(gte(projects.lastScan, new Date(0)));
+
+  const recentScans = await db.select({
+    id: scans.id,
+    projectId: scans.projectId,
+    status: scans.status,
+    startedAt: scans.startedAt,
+    completedAt: scans.completedAt,
+    projectName: projects.name,
+    issues: projects.issues,
+  }).from(scans).leftJoin(projects, eq(scans.projectId, projects.id))
+    .orderBy(desc(scans.startedAt)).limit(6);
+  const projectsWithScanHistory = await db.select({ projectId: scans.projectId }).from(scans);
+
+  const recentFindings = await db.select({
+    severity: vulnerabilities.severity,
+    createdAt: vulnerabilities.createdAt,
+  }).from(vulnerabilities).where(gte(vulnerabilities.createdAt, new Date(Date.now() - 5 * 30 * 24 * 60 * 60 * 1000)));
+
+  const months = Array.from({ length: 6 }, (_, index) => {
+    const date = new Date();
+    date.setMonth(date.getMonth() - (5 - index), 1);
+    return {
+      name: date.toLocaleString('en', { month: 'short' }),
+      year: date.getFullYear(),
+      month: date.getMonth(),
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+    };
+  });
+
+  for (const finding of recentFindings) {
+    if (!finding.createdAt) continue;
+    const month = months.find((item) => item.month === finding.createdAt!.getMonth() && item.year === finding.createdAt!.getFullYear());
+    if (!month) continue;
+    const severity = finding.severity.toLowerCase() as 'critical' | 'high' | 'medium' | 'low';
+    if (severity in month) month[severity] += 1;
+  }
+
+  const scannedProjectIds = new Set(projectsWithScanHistory.map((scan) => scan.projectId).filter(Boolean));
+  const legacyScanRows = scannedProjectRows
+    .filter((project) => project.lastScan && !scannedProjectIds.has(project.id))
+    .map((project) => ({
+      id: `legacy-${project.id}`,
+      projectId: project.id,
+      status: 'completed',
+      startedAt: project.lastScan,
+      completedAt: project.lastScan,
+      projectName: project.name,
+      issues: project.issues,
+    }));
+  const dashboardRecentScans = [...recentScans, ...legacyScanRows]
+    .sort((left, right) => (right.startedAt?.getTime() ?? 0) - (left.startedAt?.getTime() ?? 0))
+    .slice(0, 6);
+  const legacyScanCount = scannedProjectRows.filter((project) => project.lastScan && !scannedProjectIds.has(project.id)).length;
+  const findingTotal = allFindings.value;
+  return {
+    stats: {
+      projects: projectCount.value,
+      openFindings: openCount.value,
+      scans: scanCount.value + legacyScanCount,
+      resolvedRate: findingTotal ? Math.round((resolvedCount.value / findingTotal) * 100) : 0,
+    },
+    chart: months.map(({ name, critical, high, medium, low }) => ({ name, critical, high, medium, low })),
+    recentProjects,
+    recentScans: dashboardRecentScans,
+  };
+}
+
 export async function saveProject(data: CreateProjectData) {
   const repoValue = data.repository.trim();
   const rawCode = data.code?.trim()
@@ -181,6 +273,7 @@ export async function saveProject(data: CreateProjectData) {
     lastScan: new Date(),
   });
   const findings = findVulnerabilities(rawCode, repoValue);
+  const completedAt = new Date();
   if (findings.length) {
     await db.insert(vulnerabilities).values(findings.map((finding) => ({
       id: globalThis.crypto.randomUUID(),
@@ -197,8 +290,14 @@ export async function saveProject(data: CreateProjectData) {
   await db.update(projects).set({
     status: 'completed',
     issues: findings.length,
-    lastScan: new Date(),
+    lastScan: completedAt,
   }).where(eq(projects.id, id));
+  await db.insert(scans).values({
+    projectId: id,
+    status: 'completed',
+    startedAt: completedAt,
+    completedAt,
+  });
 
   return { id, findings: findings.length };
 }
@@ -213,6 +312,7 @@ export async function scanProject(projectId: string) {
   if (!code.trim()) throw new Error('No source code is available to scan.');
 
   const findings = findVulnerabilities(code, project.repository);
+  const completedAt = new Date();
   await db.delete(vulnerabilities).where(eq(vulnerabilities.projectId, projectId));
   if (findings.length) {
     await db.insert(vulnerabilities).values(findings.map((finding) => ({
@@ -231,8 +331,14 @@ export async function scanProject(projectId: string) {
     code,
     status: 'completed',
     issues: findings.length,
-    lastScan: new Date(),
+    lastScan: completedAt,
   }).where(eq(projects.id, projectId));
+  await db.insert(scans).values({
+    projectId,
+    status: 'completed',
+    startedAt: completedAt,
+    completedAt,
+  });
   return { findings: findings.length };
 }
 
