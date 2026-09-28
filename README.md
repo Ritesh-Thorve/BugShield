@@ -98,17 +98,6 @@ Schema migrations are under `lib/db/migrations`. `drizzle-kit push` is convenien
 
 This codebase should not be deployed for multiple real users until project and finding queries are scoped to an authenticated owner. The current schema has no owner/user ID on projects, and server actions can operate on globally queried project and finding records. Add ownership constraints and a reviewed migration before exposing user data.
 
-Before deployment:
-
-- Rotate any credentials previously used in development and provision new production secrets.
-- Configure production Clerk keys, allowed origins, and sign-in/sign-up settings.
-- Use a managed PostgreSQL database, TLS connections, backups, connection pooling, and reviewed migrations.
-- Resolve all high-severity dependency audit findings. In particular, review unused packages and run `npm audit` after dependency changes.
-- Add a working linter, unit/integration tests, and CI checks.
-- Add rate limits and timeouts for repository scans and PDF export.
-- Decide how findings are retained, resolved, and deleted; currently the product has no scheduled scans or email delivery.
-- Review scanner rules and verify every finding manually; patterns alone do not establish exploitability.
-
 Check dependencies with:
 
 ```bash
@@ -134,6 +123,9 @@ public/              Static assets
 5. **Persistence:** The app stores project data, scan history, and findings in PostgreSQL through Drizzle ORM.
 6. **Review and reporting:** The dashboard reads project and scan aggregates from the database. The Vulnerabilities page loads findings and supports search and filtering. Its report endpoint builds a PDF from stored findings, including a summary, findings register, evidence, and suggested remediation.
 
-Repository scans run synchronously during project submission or a manual rescan. There is currently no background job queue, automatic scheduled scanning, email notification delivery, or private-repository retrieval. The current database also does not associate records with an authenticated user; as noted above, enforce per-user ownership before using this application with multiple real users.
+## Demo
+[**View Working Project →**](https://drive.google.com/file/d/1UnZjCIRZBPHFYgtoTRtxjqh0MYtnXzkC/view?usp=sharing)
+
+
 
 
