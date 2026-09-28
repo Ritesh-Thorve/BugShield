@@ -169,6 +169,7 @@ export async function getVulnerabilities() {
 export async function getDashboardData() {
   const [projectCount] = await db.select({ value: count() }).from(projects);
   const [openCount] = await db.select({ value: count() }).from(vulnerabilities).where(eq(vulnerabilities.status, 'open'));
+  const [criticalCount] = await db.select({ value: count() }).from(vulnerabilities).where(eq(vulnerabilities.severity, 'critical'));
   const [scanCount] = await db.select({ value: count() }).from(scans);
   const [resolvedCount] = await db.select({ value: count() }).from(vulnerabilities).where(eq(vulnerabilities.status, 'fixed'));
   const [allFindings] = await db.select({ value: count() }).from(vulnerabilities);
@@ -204,6 +205,23 @@ export async function getDashboardData() {
     severity: vulnerabilities.severity,
     createdAt: vulnerabilities.createdAt,
   }).from(vulnerabilities).where(gte(vulnerabilities.createdAt, new Date(Date.now() - 5 * 30 * 24 * 60 * 60 * 1000)));
+
+  const openFindings = await db.select({
+    id: vulnerabilities.id,
+    title: vulnerabilities.title,
+    severity: vulnerabilities.severity,
+    description: vulnerabilities.description,
+    location: vulnerabilities.location,
+    status: vulnerabilities.status,
+    createdAt: vulnerabilities.createdAt,
+    projectName: projects.name,
+  }).from(vulnerabilities).leftJoin(projects, eq(vulnerabilities.projectId, projects.id))
+    .where(eq(vulnerabilities.status, 'open'));
+  const severityRank: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+  const priorityFindings = openFindings
+    .sort((left, right) => (severityRank[left.severity.toLowerCase()] ?? 4) - (severityRank[right.severity.toLowerCase()] ?? 4)
+      || (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0))
+    .slice(0, 6);
 
   const months = Array.from({ length: 6 }, (_, index) => {
     const date = new Date();
@@ -248,12 +266,14 @@ export async function getDashboardData() {
     stats: {
       projects: projectCount.value,
       openFindings: openCount.value,
+      criticalFindings: criticalCount.value,
       scans: scanCount.value + legacyScanCount,
       resolvedRate: findingTotal ? Math.round((resolvedCount.value / findingTotal) * 100) : 0,
     },
     chart: months.map(({ name, critical, high, medium, low }) => ({ name, critical, high, medium, low })),
     recentProjects,
     recentScans: dashboardRecentScans,
+    priorityFindings,
   };
 }
 
