@@ -1,6 +1,3 @@
-from pathlib import Path
-
-content = r'''---
 title: "BugShield: A Heuristic Source-Code Security Scanning and Findings-Management Platform for Web Applications"
 authors:
   - name: Ritesh Thorve
